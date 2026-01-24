@@ -28,6 +28,7 @@ from mutagen.flac import FLAC, Picture
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3
 from mutagen.id3._frames import APIC
+from mutagen.wave import WAVE
 
 # ============================================================
 # CONFIGURATION
@@ -36,7 +37,7 @@ from mutagen.id3._frames import APIC
 TARGET_SIZE = (160, 160)
 COVER_FILENAME = "cover.jpg"
 
-SUPPORTED_AUDIO = (".flac", ".mp3")
+SUPPORTED_AUDIO = (".flac", ".mp3", ".wav")
 SUPPORTED_IMAGES = (".jpg", ".jpeg", ".png")
 
 MB_HEADERS = {
@@ -244,6 +245,13 @@ def extract_audio_cover(path):
             for tag in audio.tags.values():
                 if hasattr(tag, 'data'):  # Check if it's an APIC frame
                     return tag.data
+        elif path.endswith(".wav"):
+            audio = WAVE(path)
+            if not audio.tags:
+                return None
+            for tag in audio.tags.values():
+                if hasattr(tag, 'data'):  # Check if it's an APIC frame
+                    return tag.data
     except Exception as e:
         logger.warning(f"[AUDIO] Failed to read cover: {path} ({e})")
     return None
@@ -263,16 +271,49 @@ def inject_cover(path, image_bytes):
             audio = MP3(path, ID3=ID3)
             if audio.tags is None:
                 audio.add_tags()
+                # After add_tags(), tags should be available
+                if audio.tags is None:
+                    logger.warning(f"[AUDIO] Failed to create tags for {path}")
+                    return
             
-            # Ensure tags exist before trying to modify them
-            if audio.tags is not None:
-                audio.tags.delall("APIC")
-                apic = APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=image_bytes)
+            # Clear existing APIC tags
+            audio.tags.delall("APIC")
+            
+            # Add new APIC tag
+            apic = APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=image_bytes)
+            try:
+                audio.tags.add(apic)
+            except:
+                # Alternative method for different mutagen versions
                 try:
-                    audio.tags.add(apic)
-                except:
-                    # Alternative method for different mutagen versions
                     audio.tags["APIC:Cover"] = apic
+                except Exception as e:
+                    logger.warning(f"[AUDIO] Failed to add APIC tag: {e}")
+                    return
+            audio.save()
+        elif path.endswith(".wav"):
+            audio = WAVE(path)
+            if audio.tags is None:
+                audio.add_tags()
+                # After add_tags(), tags should be available
+                if audio.tags is None:
+                    logger.warning(f"[AUDIO] Failed to create tags for {path}")
+                    return
+            
+            # Clear existing APIC tags
+            audio.tags.delall("APIC")
+            
+            # Add new APIC tag
+            apic = APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=image_bytes)
+            try:
+                audio.tags.add(apic)
+            except:
+                # Alternative method for different mutagen versions
+                try:
+                    audio.tags["APIC:Cover"] = apic
+                except Exception as e:
+                    logger.warning(f"[AUDIO] Failed to add APIC tag: {e}")
+                    return
             audio.save()
         stats["audio_updated"] += 1
         filename = os.path.basename(path)
@@ -313,8 +354,15 @@ def process_directory(path):
                 album_list = a.get("album")
                 artist = artist_list[0] if artist_list else None
                 album = album_list[0] if album_list else None
-            else:
+            elif audio.endswith(".mp3"):
                 a = MP3(audio, ID3=ID3)
+                if a.tags:
+                    artist_tag = a.tags.get("TPE1")
+                    album_tag = a.tags.get("TALB")
+                    artist = artist_tag.text[0] if artist_tag else None
+                    album = album_tag.text[0] if album_tag else None
+            elif audio.endswith(".wav"):
+                a = WAVE(audio)
                 if a.tags:
                     artist_tag = a.tags.get("TPE1")
                     album_tag = a.tags.get("TALB")

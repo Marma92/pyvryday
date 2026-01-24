@@ -21,7 +21,7 @@ pip install requests pillow mutagen
 ```
 
 ### Supported Formats
-- **Audio**: FLAC, MP3
+- **Audio**: FLAC, MP3, WAV
 - **Images**: JPG, JPEG, PNG
 
 ## Installation
@@ -147,7 +147,7 @@ Total time: 123.45s
 
 ### 1. Directory Scanning
 - Recursively walks through all subdirectories
-- Identifies audio files (.flac, .mp3) in each directory
+- Identifies audio files (.flac, .mp3, .wav) in each directory
 - Skips directories without audio files (logs this action)
 
 ### 2. Cover.jpg Processing
@@ -160,7 +160,7 @@ Total time: 123.45s
 
 ### 3. Audio File Analysis
 - **Individual Inspection**: Examines every audio file separately
-- **Metadata Extraction**: Pulls embedded cover art from FLAC/MP3 files
+- **Metadata Extraction**: Pulls embedded cover art from FLAC/MP3/WAV files
 - **Size Measurement**: Logs current cover dimensions for each file
 - **Update Identification**: Flags files needing metadata updates
 
@@ -178,6 +178,7 @@ Total time: 123.45s
 - **Batch Updates**: Applies standardized cover to all files needing updates
 - **Size Enforcement**: Ensures all audio metadata contains 160x160 covers
 - **Format Preservation**: Maintains original audio format and quality
+- **Multi-Format Support**: Works with FLAC, MP3, and WAV files
 - **Progress Logging**: Reports each file update
 
 ### 6. Image Processing Details
