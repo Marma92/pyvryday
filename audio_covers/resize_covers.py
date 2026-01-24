@@ -26,7 +26,8 @@ import requests
 from PIL import Image
 from mutagen.flac import FLAC, Picture
 from mutagen.mp3 import MP3
-from mutagen.id3 import ID3, APIC
+from mutagen.id3 import ID3
+from mutagen.id3._frames import APIC
 
 # ============================================================
 # CONFIGURATION
@@ -150,7 +151,7 @@ def resize_image(image_bytes):
         img = img.crop((left, top, right, bottom))
     
     # Resize to target square size
-    img = img.resize(TARGET_SIZE, Image.LANCZOS)
+    img = img.resize(TARGET_SIZE, Image.Resampling.LANCZOS)
     out = BytesIO()
     img.save(out, format="JPEG", quality=90)
     return out.getvalue(), img.size
@@ -241,7 +242,7 @@ def extract_audio_cover(path):
             if not audio.tags:
                 return None
             for tag in audio.tags.values():
-                if isinstance(tag, APIC):
+                if hasattr(tag, 'data'):  # Check if it's an APIC frame
                     return tag.data
     except Exception as e:
         logger.warning(f"[AUDIO] Failed to read cover: {path} ({e})")
@@ -260,19 +261,18 @@ def inject_cover(path, image_bytes):
             audio.save()
         elif path.endswith(".mp3"):
             audio = MP3(path, ID3=ID3)
-            if audio.tags:
-                audio.tags.delall("APIC")
-            else:
+            if audio.tags is None:
                 audio.add_tags()
-            audio.tags.add(
-                APIC(
-                    encoding=3,
-                    mime="image/jpeg",
-                    type=3,
-                    desc="Cover",
-                    data=image_bytes,
-                )
-            )
+            
+            # Ensure tags exist before trying to modify them
+            if audio.tags is not None:
+                audio.tags.delall("APIC")
+                apic = APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=image_bytes)
+                try:
+                    audio.tags.add(apic)
+                except:
+                    # Alternative method for different mutagen versions
+                    audio.tags["APIC:Cover"] = apic
             audio.save()
         stats["audio_updated"] += 1
         filename = os.path.basename(path)
@@ -288,77 +288,129 @@ def process_directory(path):
     start = time.time()
     logger.info(f"[DIR] Processing: {path}")
 
-    images = []
     audios = []
+    cover_path = os.path.join(path, COVER_FILENAME)
 
+    # Collect all audio files
     for f in os.listdir(path):
         full_path = Path(path) / f
-        if full_path.suffix.lower() in SUPPORTED_IMAGES:
-            images.append(str(full_path))
-        elif full_path.suffix.lower() in SUPPORTED_AUDIO:
+        if full_path.suffix.lower() in SUPPORTED_AUDIO:
             audios.append(str(full_path))
 
     if not audios:
+        logger.info(f"[DIR] No audio files found: {path}")
+        folder_timings[path] = time.time() - start
+        time.sleep(PAUSE_BETWEEN_DIRS)
         return
 
-    folder_cover = None
-    for img_path in images:
-        try:
-            with open(img_path, "rb") as f:
-                data = f.read()
-            if not image_is_too_small(data):
-                folder_cover = data
-                break
-        except Exception:
-            continue
-
+    # Get artist/album info for online search
     artist = album = None
     for audio in audios:
         try:
             if audio.endswith(".flac"):
                 a = FLAC(audio)
-                artist = a.get("artist", [None])[0]
-                album = a.get("album", [None])[0]
+                artist_list = a.get("artist")
+                album_list = a.get("album")
+                artist = artist_list[0] if artist_list else None
+                album = album_list[0] if album_list else None
             else:
                 a = MP3(audio, ID3=ID3)
-                artist_tag = a.tags.get("TPE1")
-                album_tag = a.tags.get("TALB")
-                artist = artist_tag.text[0] if artist_tag else None
-                album = album_tag.text[0] if album_tag else None
+                if a.tags:
+                    artist_tag = a.tags.get("TPE1")
+                    album_tag = a.tags.get("TALB")
+                    artist = artist_tag.text[0] if artist_tag else None
+                    album = album_tag.text[0] if album_tag else None
             if artist and album:
                 break
         except Exception:
             continue
 
-    final_cover = folder_cover
+    final_cover = None
+    cover_resized = False
 
-    if not final_cover:
-        for audio in audios:
-            cover = extract_audio_cover(audio)
-            if cover and not image_is_too_small(cover):
-                final_cover = cover
+    # 1. Check if cover.jpg exists in folder
+    if os.path.exists(cover_path):
+        try:
+            with open(cover_path, "rb") as f:
+                folder_cover = f.read()
+            
+            # Check size of cover.jpg
+            img = Image.open(BytesIO(folder_cover))
+            logger.info(f"[COVER] Found {COVER_FILENAME} with size {img.width}x{img.height}")
+            
+            if img.width > TARGET_SIZE[0] or img.height > TARGET_SIZE[1]:
+                logger.info(f"[COVER] Resizing {COVER_FILENAME} from {img.width}x{img.height} to {TARGET_SIZE[0]}x{TARGET_SIZE[1]}")
+                final_cover, size = resize_image(folder_cover)
+                
+                # Replace the cover.jpg with resized version
+                with open(cover_path, "wb") as f:
+                    f.write(final_cover)
+                logger.info(f"[COVER] Updated {COVER_FILENAME} to {size[0]}x{size[1]}")
+                stats["covers_written"] += 1
+                cover_resized = True
+            else:
+                logger.info(f"[COVER] {COVER_FILENAME} already optimized at {img.width}x{img.height}")
+                final_cover = folder_cover
+                
+        except Exception as e:
+            logger.warning(f"[COVER] Failed to process {COVER_FILENAME}: {e}")
+
+    # 2. Check each audio file for oversized covers
+    files_needing_update = []
+    for audio in audios:
+        current_cover = extract_audio_cover(audio)
+        if current_cover:
+            img = Image.open(BytesIO(current_cover))
+            logger.info(f"[AUDIO] {os.path.basename(audio)} has cover {img.width}x{img.height}")
+            
+            if img.width > TARGET_SIZE[0] or img.height > TARGET_SIZE[1]:
+                files_needing_update.append((audio, current_cover))
+                logger.info(f"[AUDIO] {os.path.basename(audio)} needs cover update (oversized)")
+        else:
+            logger.info(f"[AUDIO] {os.path.basename(audio)} has no cover")
+            files_needing_update.append((audio, None))
+
+    # 3. If we have files needing updates but no cover.jpg, create one
+    if files_needing_update and not final_cover:
+        for audio, current_cover in files_needing_update:
+            if current_cover:
+                # Use the first available cover to create cover.jpg
+                img = Image.open(BytesIO(current_cover))
+                logger.info(f"[COVER] Creating {COVER_FILENAME} from {os.path.basename(audio)} ({img.width}x{img.height})")
+                final_cover, size = resize_image(current_cover)
+                with open(cover_path, "wb") as f:
+                    f.write(final_cover)
+                logger.info(f"[COVER] Created {COVER_FILENAME} ({size[0]}x{size[1]})")
+                stats["covers_written"] += 1
                 break
 
-    if (not final_cover or image_is_too_small(final_cover)) and is_online():
+    # 4. If still no cover available, try online download
+    if files_needing_update and not final_cover and is_online():
+        logger.info(f"[COVER] No local covers available, searching online for {artist} / {album}")
         online = fetch_cover_online(artist, album)
         if online:
             final_cover, size = resize_image(online)
-            logger.info(f"[COVER] Redimensionnée en {size[0]}x{size[1]}")
-            cover_path = os.path.join(path, COVER_FILENAME)
             with open(cover_path, "wb") as f:
                 f.write(final_cover)
+            logger.info(f"[COVER] Downloaded and created {COVER_FILENAME} ({size[0]}x{size[1]})")
             stats["covers_written"] += 1
 
-    if not final_cover:
-        logger.warning("[DIR] No usable cover found")
-        folder_timings[path] = time.time() - start
-        time.sleep(PAUSE_BETWEEN_DIRS)
-        return
-
-    for audio in audios:
-        current = extract_audio_cover(audio)
-        if not current or image_is_too_small(current):
+    # 5. Update all files that need it
+    if final_cover:
+        for audio, current_cover in files_needing_update:
             inject_cover(audio, final_cover)
+    else:
+        if files_needing_update:
+            logger.warning("[DIR] No cover available for updating audio files")
+
+    # Log summary
+    updated_count = len(files_needing_update) if final_cover else 0
+    if updated_count > 0:
+        logger.info(f"[DIR] Updated covers for {updated_count} audio files")
+    elif files_needing_update:
+        logger.info(f"[DIR] {len(files_needing_update)} files checked, no updates needed")
+    else:
+        logger.info(f"[DIR] All audio files already have properly sized covers")
 
     folder_timings[path] = time.time() - start
     time.sleep(PAUSE_BETWEEN_DIRS)
