@@ -1,0 +1,4 @@
+requests>=2.25.0
+Pillow>=8.0.0
+mutagen>=1.45.0
+rich>=13.0.0
